@@ -52,9 +52,12 @@ State lives in `<repo>/.repofold/` (add it and `repofold-wiki/` to your `.gitign
 
 ## Model guidance
 
-- `qwen3:8b` (default): workable pages on an 8 GB GPU, but expect rough edges.
-- `qwen3:14b`, `qwen3:30b-a3b`, or `gpt-oss:20b`: noticeably better structure and prose if your hardware allows it.
+- `qwen3:8b` (default): fits an 8 GB GPU. Workable, but citations and structure get rough; the built-in retry gate compensates where it can.
+- `qwen3:14b`: the recommended choice on a 16 GB GPU (RTX 4080/5070 Ti class). Noticeably richer pages and far more reliable citations.
+- `qwen3:30b-a3b` or `gpt-oss:20b`: better still, for 24 GB+ cards.
 - `--planner-model` lets you use a bigger model only for the architecture analysis, which has the highest leverage per token.
+
+When a generated page ends up without a single valid citation, repofold automatically retries it once with explicit citation feedback and keeps the better attempt.
 
 Set expectations accordingly: local models are slower and less accurate than the frontier models behind the hosted product. A first full run on a mid-size repository takes tens of minutes to hours on consumer hardware; subsequent runs are fast because of the incremental cache. Citation validation is deterministic and runs regardless of model quality, so wrong line references get stripped rather than published.
 

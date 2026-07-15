@@ -909,6 +909,45 @@ export async function runPipeline(
         rawMd = await verifyPageV2(input, rawMd, progress.usageSink);
       }
       let { markdown, issues } = validateAndCleanCitations(rawMd, citeMap, moduleLinks);
+
+      // Quality gate for small local models: a detail page whose citations
+      // were all invalid (stripped by the validator) or missing entirely is
+      // ungrounded. Retry once with explicit feedback via the same hook the
+      // cloud uses for reader feedback; keep whichever attempt cites more.
+      const citationKinds = new Set([
+        "module",
+        "subsystem-group",
+        "getting-started",
+        "configuration",
+        "data-model",
+        "api-reference",
+        "deployment",
+        "development",
+        "coverage",
+      ]);
+      const citeCount = (text: string) => (text.match(/\[\[cite:/g) ?? []).length;
+      if (citationKinds.has(brief.kind) && citeCount(markdown) === 0) {
+        progress.line(`${page.slug}: no valid citations, retrying with feedback`);
+        const retryInput: PageGenInput = {
+          ...input,
+          feedbackNote:
+            "The previous draft of this page contained no valid citations. Every factual claim " +
+            "about the code MUST carry a [[cite:path:start-end]] token whose path exists in the " +
+            "provided sources and whose line range matches the cited code. Prefer fewer, " +
+            "well-anchored claims over uncited prose.",
+        };
+        try {
+          let retryMd = await generatePageV2(retryInput, progress.usageSink);
+          if (config.verify) retryMd = await verifyPageV2(retryInput, retryMd, progress.usageSink);
+          const retry = validateAndCleanCitations(retryMd, citeMap, moduleLinks);
+          if (citeCount(retry.markdown) > 0) {
+            markdown = retry.markdown;
+            issues = retry.issues;
+          }
+        } catch {
+          // keep the first attempt; a failed retry must not sink the page
+        }
+      }
       markdown = stripEmDashes(markdown);
 
       // mermaid prune-only validation (architecture pages)
