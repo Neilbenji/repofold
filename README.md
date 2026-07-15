@@ -4,23 +4,30 @@ Generate a documentation wiki from a local git repository, fully offline. Every 
 
 Your code never leaves your machine: the only network traffic is to your own local [Ollama](https://ollama.com) server. No telemetry, no analytics, no external requests of any kind, neither from the CLI nor from the generated site.
 
-This is the open-source engine behind [repofold.dev](https://repofold.dev), the hosted version that syncs automatically with GitHub, uses stronger frontier models, and adds full-text search, Ask-the-repo with cited answers, and an MCP server for coding agents.
+This is the open-source engine behind [repofold.dev](https://repofold.dev). The pipeline is developed and fully tested against DeepSeek's frontier models in the hosted product, where it performs at its best. For the highest quality wikis with zero setup — automatic GitHub sync, full-text search, Ask-the-repo with cited answers, and an MCP server for coding agents — use the cloud version. Use this CLI when your code is not allowed to leave your machine, or when you simply prefer running everything yourself.
 
 ## Quickstart
 
 Requirements: Node.js 20+, git, and [Ollama](https://ollama.com).
 
 ```bash
-# 1. Pull a model (qwen3:8b is the default; see model guidance below)
+# 1. Install repofold (npm package coming soon)
+git clone https://github.com/Neilbenji/repofold.git
+cd repofold
+npm install && npm run build && npm install -g .
+
+# 2. Pull a model (qwen3:8b is the default; see model guidance below)
 ollama pull qwen3:8b
 
-# 2. Serve Ollama with a context window large enough for the prompts.
+# 3. Serve Ollama with a context window large enough for the prompts.
 #    THIS MATTERS: many Ollama installs default to a 4096-token context,
 #    which silently truncates prompts and produces poor pages.
 OLLAMA_CONTEXT_LENGTH=24576 ollama serve
+# Windows (PowerShell):  $env:OLLAMA_CONTEXT_LENGTH="24576"; ollama serve
+# Or set it persistently: setx OLLAMA_CONTEXT_LENGTH 24576  (then restart Ollama)
 
-# 3. Generate the wiki for a repository
-npx repofold generate path/to/your/repo --serve
+# 4. Generate the wiki for a repository
+repofold generate path/to/your/repo --serve
 ```
 
 The wiki lands in `path/to/your/repo/repofold-wiki/`: a static HTML site (works from `file://`, no server needed) plus a `markdown/` export tree. `--serve` opens it on `http://localhost:4173`.
@@ -67,7 +74,7 @@ State lives in `<repo>/.repofold/` (add it and `repofold-wiki/` to your `.gitign
 
 When a generated page ends up without a single valid citation, repofold automatically retries it once with explicit citation feedback and keeps the better attempt.
 
-Set expectations accordingly: local models are slower and less accurate than the frontier models behind the hosted product. A first full run on a mid-size repository takes tens of minutes to hours on consumer hardware; subsequent runs are fast because of the incremental cache. Citation validation is deterministic and runs regardless of model quality, so wrong line references get stripped rather than published.
+Set expectations accordingly: local models are slower and produce less polished prose than the DeepSeek models behind [repofold.dev](https://repofold.dev), where this pipeline is fully tested and performs at its best. Deep mode closes most of the gap on grounding: citations are attached by the harness from parser data, so they are correct by construction regardless of model size. A first full run on a mid-size repository takes tens of minutes to hours on consumer hardware; subsequent runs are fast because of the incremental cache.
 
 ## How it works
 
