@@ -1,0 +1,115 @@
+/* Extracted from repofold-cloud apps/web/app/styles/base.css (reset, body,
+   anchors, headings, brand) plus the public share topbar block from
+   interactive.css. Everything else styling the wiki lives in wiki.css and
+   markdown.css, copied verbatim. */
+/* The cloud app provides --font-inter via next/font; the static site uses
+   the system UI stack instead (no font downloads, no external requests). */
+:root {
+  --font-inter: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  font-family: var(--font-sans);
+  font-size: var(--fs-2);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  letter-spacing: var(--tracking-tight);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+h1 {
+  font-size: 28px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  letter-spacing: var(--tracking-heading);
+}
+h2 {
+  letter-spacing: var(--tracking-heading);
+}
+
+.brand-logo-mark {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  color: currentColor;
+  --brand-logo-surface: var(--bg);
+  --brand-logo-accent: #75d9b6;
+}
+
+/* --- Public share view topbar (the static wiki chrome) --- */
+.share-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 49px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+.share-repo {
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: var(--tracking-heading);
+}
+.share-owner {
+  color: var(--text-soft);
+  font-weight: 450;
+}
+.share-badge {
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+.share-spacer {
+  flex: 1;
+}
+.share-gh {
+  color: var(--text-soft);
+  font-size: var(--fs-0);
+}
+.share-gh:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+/* Citations without a repository URL render as plain code spans. */
+.cite-plain {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  color: var(--text-soft);
+}

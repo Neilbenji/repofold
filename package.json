@@ -1,0 +1,75 @@
+{
+  "name": "repofold",
+  "version": "0.1.0",
+  "description": "Generate a documentation wiki from a local git repository, fully offline, with every claim citing the exact lines of code. Powered by your own Ollama models: your code never leaves your machine.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "bin": {
+    "repofold": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@10.14.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Neilbenji/repofold.git"
+  },
+  "homepage": "https://repofold.dev",
+  "keywords": [
+    "documentation",
+    "wiki",
+    "generator",
+    "ollama",
+    "local-llm",
+    "codebase",
+    "citations",
+    "offline",
+    "privacy"
+  ],
+  "dependencies": {
+    "@secretlint/core": "^13.0.2",
+    "@secretlint/secretlint-rule-preset-recommend": "^13.0.2",
+    "@shikijs/langs": "^3.23.0",
+    "@shikijs/rehype": "^3.7.0",
+    "@shikijs/themes": "^3.23.0",
+    "bottleneck": "^2.19.5",
+    "commander": "^13.1.0",
+    "github-slugger": "^2.0.0",
+    "ignore": "^7.0.5",
+    "mdast-util-to-string": "^4.0.0",
+    "mermaid": "^11.7.0",
+    "openai": "^5.10.1",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "rehype-slug": "^6.0.0",
+    "remark-gfm": "^4.0.1",
+    "remark-parse": "^11.0.0",
+    "shiki": "^3.7.0",
+    "tree-sitter-wasms": "^0.1.12",
+    "unified": "^11.0.5",
+    "unist-util-visit": "^5.0.0",
+    "web-tree-sitter": "^0.25.6",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.3"
+  }
+}
