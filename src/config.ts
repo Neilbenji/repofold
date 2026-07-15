@@ -5,6 +5,13 @@ export type RepofoldConfig = {
   repoPath: string;
   /** Absolute path to the output directory. */
   outDir: string;
+  /**
+   * deep: many small focused calls, harness-attached citations (best quality).
+   * fast: the cloud-style single-pass pipeline (fewer, larger calls).
+   */
+  mode: "deep" | "fast";
+  /** L2 fact mining: max symbols analyzed per file. */
+  symbolCap: number;
   /** Ollama model used for all passes. */
   model: string;
   /** Ollama model used for the architecture brief (planning); defaults to `model`. */
@@ -34,6 +41,7 @@ export const DEFAULT_OLLAMA_URL = "http://localhost:11434";
 export const DEFAULT_INPUT_BUDGET = 16_000;
 export const DEFAULT_CONCURRENCY = 2;
 export const DEFAULT_SERVE_PORT = 4173;
+export const DEFAULT_SYMBOL_CAP = 8;
 
 export function resolveConfig(targetPath: string, opts: Record<string, unknown>): RepofoldConfig {
   const repoPath = path.resolve(targetPath ?? ".");
@@ -41,6 +49,8 @@ export function resolveConfig(targetPath: string, opts: Record<string, unknown>)
   return {
     repoPath,
     outDir: path.resolve(String(opts.out ?? path.join(repoPath, "repofold-wiki"))),
+    mode: opts.fast === true ? "fast" : "deep",
+    symbolCap: Number(opts.symbolCap ?? DEFAULT_SYMBOL_CAP),
     model,
     plannerModel: String(opts.plannerModel ?? model),
     ollamaUrl: String(opts.ollamaUrl ?? DEFAULT_OLLAMA_URL).replace(/\/+$/, ""),

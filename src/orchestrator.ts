@@ -48,6 +48,17 @@ import {
   type PagePlan,
 } from "./vendor/llm/passes-v2.js";
 import { chatText, configureLlm, setInputBudgetTokens } from "./vendor/llm/client.js";
+import { deepToFileSummary } from "./local/deep-summaries.js";
+import {
+  deepFileSet,
+  estimateDeepCalls,
+  runDeepSummaries,
+  runFactMining,
+  type DeepContext,
+  type FactIndex,
+} from "./local/deep-stages.js";
+import { processPageDeep, DEEP_PROMPT_VERSION, type DeepPageInput } from "./local/deep-pages.js";
+import { EtaTracker } from "./local/eta.js";
 import { ingestWorkingTree, type IngestedFile } from "./ingest.js";
 import { headSha, isDirty } from "./git.js";
 import {
@@ -67,7 +78,6 @@ const INFRA_PATH_RE =
   /(^|\/)((docker-)?compose(\.[\w.-]+)?\.ya?ml|dockerfile[^/]*|\.env\.(example|sample|template))$|^scripts\/[^/]+\.(sh|ps1|bash)$|^\.github\/workflows\/[^/]+\.ya?ml$/i;
 
 const FULL_SOURCE_MAX_CHARS = 24_000;
-const TOTAL_STAGES = 8;
 
 /** Simple promise pool: run tasks with bounded concurrency, preserving errors. */
 async function runPool<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>) {
@@ -127,10 +137,15 @@ export async function runPipeline(
 
   const sourceStore = await EncryptedTempSourceStore.create();
   const counts = { generated: 0, patched: 0, remapped: 0, skipped: 0 };
+  const deep = config.mode === "deep";
+  const totalStages = deep ? 9 : 8;
+  let stageNo = 0;
+  const nextStage = (message: string) => progress.stage(++stageNo, totalStages, message);
+  const eta = new EtaTracker(previousState.avgCallMsByPass);
 
   try {
     // ---- Stage 1: ingest ----------------------------------------------------
-    progress.stage(1, TOTAL_STAGES, "Reading the working tree");
+    nextStage("Reading the working tree");
     const previousFiles = await store.loadFiles();
     const oldShaByPath = new Map(previousFiles.map((f) => [f.path, f.blobSha]));
 
@@ -195,7 +210,7 @@ export async function runPipeline(
       if (!f.hasContent) continue;
       if ((await loadAnalysis(f.blobSha)) == null) needExtraction.push(f);
     }
-    progress.stage(2, TOTAL_STAGES, `Extracting structure (${needExtraction.length} new files)`);
+    nextStage(`Extracting structure (${needExtraction.length} new files)`);
     const EXTRACT_BATCH = 50;
     for (let i = 0; i < needExtraction.length; i += EXTRACT_BATCH) {
       const slice = needExtraction.slice(i, i + EXTRACT_BATCH);
@@ -224,8 +239,13 @@ export async function runPipeline(
     for (const f of analyzable) await loadAnalysis(f.blobSha);
     for (const sha of oldShaByPath.values()) await loadAnalysis(sha);
 
-    const summaryOf = (blobSha: string): FileSummary | null =>
-      analysisMap.get(blobSha)?.summary ?? null;
+    // In deep mode the richer per-file analysis feeds every downstream pass.
+    const summaryOf = (blobSha: string): FileSummary | null => {
+      const record = analysisMap.get(blobSha);
+      if (!record) return null;
+      if (deep && record.deepSummary) return deepToFileSummary(record.deepSummary);
+      return record.summary ?? null;
+    };
     const symbolsOf = (blobSha: string): Symbol[] => analysisMap.get(blobSha)?.symbols ?? [];
 
     // ---- Repo header (stable prompt prefix) ----------------------------------
@@ -243,8 +263,77 @@ export async function runPipeline(
       topLevelDirs: [...new Set(sourceFiles.map((f) => f.path.split("/")[0]))].slice(0, 25),
     });
 
-    // ---- Stage 3: Pass A file summaries ---------------------------------------
+    // ---- Modules (deterministic; needs only imports, so it can run before the
+    // summaries — deep mode selects its files by module rank) ------------------
+    nextStage("Deriving modules");
+    const manifestCandidates = analyzable.filter(
+      (f) =>
+        f.kind === "config" ||
+        /^\.github\/workflows\//.test(f.path) ||
+        /(^|\/)(docker-)?compose(\.[\w.-]+)?\.ya?ml$/i.test(f.path) ||
+        /(^|\/)\.env\.(example|sample|template)$/i.test(f.path),
+    );
+    const manifestContents = await sourceStore.getMany(manifestCandidates.map((f) => f.blobSha));
+    const manifestFactsResult = buildManifestFacts(
+      manifestCandidates
+        .map((f) => ({ path: f.path, content: manifestContents.get(f.blobSha) ?? "" }))
+        .filter((m) => m.content !== ""),
+    );
+    const manifestFacts = manifestFactsResult.text;
+
+    const importsByPath = new Map<string, string[]>();
+    for (const f of sourceFiles) {
+      const a = analysisMap.get(f.blobSha);
+      if (a) importsByPath.set(f.path, a.imports ?? []);
+    }
+    const graph: ModuleGraph = deriveModules({
+      files: sourceFiles.map((f) => ({ path: f.path, language: f.language })),
+      importsByPath,
+      workspaceNameToDir: manifestFactsResult.workspaceNameToDir,
+      anchorDirs: manifestFactsResult.anchorDirs,
+    });
+    progress.line(`${graph.modules.length} modules, ${graph.edges.length} edges`);
+
+    const rankOf = (p: string) => graph.fileRank.get(p) ?? 0;
+    const byRankThenPath = (a: { path: string }, b: { path: string }) =>
+      rankOf(b.path) - rankOf(a.path) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+
+    const inboundOf = new Map<string, EdgeLine[]>();
+    const outboundOf = new Map<string, EdgeLine[]>();
+    for (const e of graph.edges) {
+      if (!outboundOf.has(e.from)) outboundOf.set(e.from, []);
+      outboundOf.get(e.from)!.push({ module: e.to, weight: e.weight });
+      if (!inboundOf.has(e.to)) inboundOf.set(e.to, []);
+      inboundOf.get(e.to)!.push({ module: e.from, weight: e.weight });
+    }
+    const fileByPath = new Map(sourceFiles.map((f) => [f.path, f]));
+
+    const deepCtx: DeepContext = {
+      config,
+      store,
+      sourceStore,
+      progress,
+      eta,
+      repoHeader,
+      model: summaryModel,
+      infraFiles: analyzable.filter((f) => f.kind === "config" || INFRA_PATH_RE.test(f.path)),
+      sourceFiles,
+      fileByPath,
+      analysisMap,
+      oldShaByPath,
+      transientSkeletons,
+      importsByPath,
+      workspaceNameToDir: manifestFactsResult.workspaceNameToDir,
+      graph,
+      rankOf,
+    };
+    const deepFiles = deep ? deepFileSet(deepCtx) : new Set<string>();
+
+    // ---- Pass A file summaries -------------------------------------------------
+    // Deep mode: one focused call per important file; the long tail (and fast
+    // mode entirely) uses the batched cloud-style pass.
     const needSummary = sourceFiles.filter((f) => {
+      if (deep && deepFiles.has(f.path)) return false;
       const a = analysisMap.get(f.blobSha);
       return (
         a &&
@@ -253,7 +342,16 @@ export async function runPipeline(
           a.summaryModel !== summaryModel)
       );
     });
-    progress.stage(3, TOTAL_STAGES, `Summarizing files (${needSummary.length} of ${sourceFiles.length})`);
+    if (deep) {
+      const deepTargets = sourceFiles.filter((f) => deepFiles.has(f.path));
+      const estimate = estimateDeepCalls(deepCtx, deepTargets);
+      nextStage(
+        `Analyzing files in depth (${estimate.l1} files, ~${eta.estimateMinutes("deep-summary", estimate.l1, config.concurrency)}m)`,
+      );
+      await runDeepSummaries(deepCtx, deepTargets, progress.usageSink);
+    } else {
+      nextStage(`Summarizing files (${needSummary.length} of ${sourceFiles.length})`);
+    }
     if (needSummary.length > 0) {
       const contents = await sourceStore.getMany(needSummary.map((f) => f.blobSha));
       const forSummary: FileForSummary[] = [];
@@ -320,51 +418,18 @@ export async function runPipeline(
       }
     }
 
-    // ---- Stage 4: modules (deterministic) -------------------------------------
-    progress.stage(4, TOTAL_STAGES, "Deriving modules");
-    const manifestCandidates = analyzable.filter(
-      (f) =>
-        f.kind === "config" ||
-        /^\.github\/workflows\//.test(f.path) ||
-        /(^|\/)(docker-)?compose(\.[\w.-]+)?\.ya?ml$/i.test(f.path) ||
-        /(^|\/)\.env\.(example|sample|template)$/i.test(f.path),
-    );
-    const manifestContents = await sourceStore.getMany(manifestCandidates.map((f) => f.blobSha));
-    const manifestFactsResult = buildManifestFacts(
-      manifestCandidates
-        .map((f) => ({ path: f.path, content: manifestContents.get(f.blobSha) ?? "" }))
-        .filter((m) => m.content !== ""),
-    );
-    const manifestFacts = manifestFactsResult.text;
-
-    const importsByPath = new Map<string, string[]>();
-    for (const f of sourceFiles) {
-      const a = analysisMap.get(f.blobSha);
-      if (a) importsByPath.set(f.path, a.imports ?? []);
-    }
-    const graph: ModuleGraph = deriveModules({
-      files: sourceFiles.map((f) => ({ path: f.path, language: f.language })),
-      importsByPath,
-      workspaceNameToDir: manifestFactsResult.workspaceNameToDir,
-      anchorDirs: manifestFactsResult.anchorDirs,
-    });
-    progress.line(`${graph.modules.length} modules, ${graph.edges.length} edges`);
-
-    const rankOf = (p: string) => graph.fileRank.get(p) ?? 0;
-    const byRankThenPath = (a: { path: string }, b: { path: string }) =>
-      rankOf(b.path) - rankOf(a.path) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-
-    const inboundOf = new Map<string, EdgeLine[]>();
-    const outboundOf = new Map<string, EdgeLine[]>();
-    for (const e of graph.edges) {
-      if (!outboundOf.has(e.from)) outboundOf.set(e.from, []);
-      outboundOf.get(e.from)!.push({ module: e.to, weight: e.weight });
-      if (!inboundOf.has(e.to)) inboundOf.set(e.to, []);
-      inboundOf.get(e.to)!.push({ module: e.from, weight: e.weight });
+    // ---- Facts (deep only): the knowledge layer ---------------------------------
+    let factIndex: FactIndex = { byId: new Map(), byPath: new Map() };
+    if (deep) {
+      const estimate = estimateDeepCalls(deepCtx, []);
+      nextStage(
+        `Mining symbol facts (~${estimate.l2} symbols, ~${eta.estimateMinutes("facts", estimate.l2, config.concurrency)}m)`,
+      );
+      factIndex = await runFactMining(deepCtx, progress.usageSink);
+      progress.line(`${factIndex.byId.size} facts across ${factIndex.byPath.size} files`);
     }
 
-    // ---- Stage 5: Pass B module summaries -------------------------------------
-    const fileByPath = new Map(sourceFiles.map((f) => [f.path, f]));
+    // ---- Pass B module summaries ------------------------------------------------
     const buildTransientSkeletons = async (selected: IngestedFile[]) => {
       const contents = await sourceStore.getMany(selected.map((f) => f.blobSha));
       const rows = await Promise.all(
@@ -425,7 +490,7 @@ export async function runPipeline(
           need.push(mfs);
         }
       }
-      progress.stage(5, TOTAL_STAGES, `Summarizing modules (${need.length} of ${graph.modules.length})`);
+      nextStage(`Summarizing modules (${need.length} of ${graph.modules.length})`);
       let done = 0;
       const batches = packModuleBatches(need);
       for (const [index, batch] of batches.entries()) {
@@ -448,8 +513,8 @@ export async function runPipeline(
       await store.saveModules(nextModules);
     }
 
-    // ---- Stage 6: Pass C plan --------------------------------------------------
-    progress.stage(6, TOTAL_STAGES, "Planning the wiki");
+    // ---- Pass C plan -------------------------------------------------------------
+    nextStage("Planning the wiki");
     const readmeFile = analyzable.find((f) => /^readme\.(md|rst|txt)$/i.test(f.path));
     let readmeExcerpt: string | undefined;
     if (readmeFile) {
@@ -634,7 +699,7 @@ export async function runPipeline(
       return { path, name: def.name, summary, facts: def.facts as ModuleFacts };
     };
 
-    progress.stage(7, TOTAL_STAGES, `Generating pages (${pageRows.length})`);
+    nextStage(`Generating pages (${pageRows.length})`);
 
     // symbol-aware citation validation map
     const citeMap = new Map(
@@ -992,18 +1057,114 @@ export async function runPipeline(
       );
     };
 
+    // Deep mode: outline -> per-section calls with harness-attached citations.
+    const allFactsByRank = deep
+      ? [...factIndex.byId.values()].sort(
+          (a, b) => rankOf(b.path) - rankOf(a.path) || a.id.localeCompare(b.id),
+        )
+      : [];
+    const processPageDeepDispatch = async (page: PageRecord) => {
+      const brief = page.brief;
+      if (!brief) {
+        pagesDone++;
+        return;
+      }
+      const startedAt = Date.now();
+
+      const scopedFiles = brief.module_paths
+        .flatMap((mp) => moduleDefByPath.get(mp)?.filePaths ?? [])
+        .map((p) => fileByPath.get(p))
+        .filter((f): f is NonNullable<typeof f> => !!f)
+        .sort(byRankThenPath);
+      const extraFiles = brief.extra_paths
+        .map((p) => analyzable.find((f) => f.path === p))
+        .filter((f): f is NonNullable<typeof f> => !!f);
+      const synthesis = brief.kind === "overview" || brief.kind === "architecture";
+      const operational = ["getting-started", "configuration", "deployment", "development"].includes(
+        brief.kind,
+      );
+
+      let pageFiles: IngestedFile[];
+      let pageFacts;
+      if (synthesis) {
+        pageFiles = [...sourceFiles].sort(byRankThenPath).slice(0, 10);
+        pageFacts = allFactsByRank.slice(0, 40);
+      } else {
+        pageFiles = [...new Set([...scopedFiles, ...extraFiles, ...(operational ? infraFiles : [])])].slice(0, 16);
+        const pathSet = new Set(pageFiles.map((f) => f.path));
+        pageFacts = [...factIndex.byId.values()].filter((f) => pathSet.has(f.path));
+        if (pageFacts.length === 0) pageFacts = allFactsByRank.slice(0, 20);
+      }
+
+      const deepInput: DeepPageInput = {
+        page,
+        brief,
+        sectionTitle: sectionTitleBySlug.get(page.parentSlug ?? "") ?? "",
+        siblings: siblingPages,
+        facts: pageFacts,
+        files: pageFiles.map((f) => ({ path: f.path, lineCount: f.lineCount, blobSha: f.blobSha })),
+        loadSource: async (p: string) => {
+          const f = fileByPath.get(p) ?? analyzable.find((candidate) => candidate.path === p);
+          if (!f) return null;
+          return (await sourceStore.getMany([f.blobSha])).get(f.blobSha) ?? null;
+        },
+        mermaid: brief.kind === "architecture" ? archMermaid : undefined,
+      };
+      try {
+        const result = await processPageDeep(deepInput, {
+          config,
+          store,
+          progress,
+          eta,
+          citeMap,
+          moduleLinks,
+          onUsage: progress.usageSink,
+          commitSha,
+        });
+        if (result.changed) {
+          changedPages.push({ slug: page.slug, title: page.title, kind: page.kind });
+        }
+        Object.assign(page, {
+          inputHash: null,
+          stableInputHash: null,
+          promptVersion: DEEP_PROMPT_VERSION,
+          promptModel: pageModel,
+          status: "published",
+          commitSha,
+        });
+        await store.savePageMarkdown(page.slug, result.markdown);
+        await store.savePages(pages);
+        counts[result.outcome]++;
+        pagesDone++;
+        const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+        const label =
+          result.outcome === "skipped"
+            ? "unchanged"
+            : result.outcome === "remapped"
+              ? "re-assembled without model calls"
+              : `${result.outcome} (${result.llmCalls} calls, ${seconds}s)`;
+        progress.line(`${page.slug}: ${label} (${pagesDone}/${pageRows.length})`);
+      } catch (err) {
+        pagesDone++;
+        progress.warn(
+          `${page.slug} failed: ${err instanceof Error ? err.message.slice(0, 300) : err}`,
+        );
+      }
+    };
+
     // two phases: module/detail pages first, then the synthesis pages
     // (overview, architecture) which must agree with them. The very first
     // page runs alone so model failures surface before the parallel wave.
+    const dispatch = deep ? processPageDeepDispatch : processPage;
     const synthesisKinds = new Set(["overview", "architecture"]);
     const detailPages = pageRows.filter((p) => !synthesisKinds.has(p.kind));
     const synthesisPages = pageRows.filter((p) => synthesisKinds.has(p.kind));
-    if (detailPages.length > 0) await processPage(detailPages[0]);
-    await runPool(detailPages.slice(1), 4, processPage);
-    await runPool(synthesisPages, 2, processPage);
+    if (detailPages.length > 0) await dispatch(detailPages[0]);
+    await runPool(detailPages.slice(1), 4, dispatch);
+    await runPool(synthesisPages, 2, dispatch);
 
-    // ---- Stage 8: changelog + cutover -------------------------------------------
-    progress.stage(8, TOTAL_STAGES, "Finishing up");
+    // ---- Changelog + cutover ------------------------------------------------------
+    nextStage("Finishing up");
 
     // changelog: auto release notes whenever pages changed
     // (skipped only on the very first index; everything is "new" then)
@@ -1039,12 +1200,16 @@ export async function runPipeline(
     for (const old of currentPages) {
       if (old.kind !== "section" && !liveSlugs.has(old.slug)) {
         await store.deletePageMarkdown(old.slug);
+        await store.deleteSections(old.slug);
       }
     }
-    await store.pruneAnalysis(new Set(analyzable.map((f) => f.blobSha)));
+    const liveShas = new Set(analyzable.map((f) => f.blobSha));
+    await store.pruneAnalysis(liveShas);
+    await store.pruneFacts(liveShas);
     state.lastIndexedCommitSha = commitSha;
     state.treeFingerprint = fingerprint;
     state.planVersion = previousState.planVersion + 1;
+    state.avgCallMsByPass = eta.snapshot();
     await store.saveState(state);
 
     return { changed: true, commitSha, counts };

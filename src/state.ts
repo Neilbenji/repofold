@@ -28,6 +28,37 @@ export type AnalysisRecord = {
   summary: FileSummary | null;
   summaryVersion: number | null;
   summaryModel: string | null;
+  // Deep mode keeps its richer summary in separate fields so fast and deep
+  // runs never invalidate each other's caches.
+  deepSummary?: DeepFileSummary | null;
+  deepSummaryVersion?: number | null;
+  deepSummaryModel?: string | null;
+};
+
+/** Structured per-file summary produced by the deep pass (src/local). */
+export type DeepFileSummary = {
+  purpose: string;
+  key_symbols: Array<{ name: string; role: string }>;
+  main_flows: string[];
+  gotchas: string[];
+  config_keys: string[];
+};
+
+/** A mined, harness-cited claim about one symbol (deep mode). */
+export type Fact = {
+  id: string;
+  text: string;
+  path: string;
+  symbol: string;
+  kind: string;
+  startLine: number;
+  endLine: number;
+};
+
+export type FactsRecord = {
+  version: number;
+  model: string;
+  facts: Fact[];
 };
 
 export type ModuleRecord = {
@@ -76,6 +107,8 @@ export type RepoState = {
   model: string | null;
   plannerModel: string | null;
   inputBudget: number | null;
+  /** EWMA latency per pass type, seeds the deep-mode ETA across runs. */
+  avgCallMsByPass?: Record<string, number>;
 };
 
 export function emptyState(): RepoState {
@@ -173,6 +206,77 @@ export class StateStore {
       }
     }
     return pruned;
+  }
+
+  async loadFacts(blobSha: string): Promise<FactsRecord | null> {
+    if (!/^[0-9a-f]{40}$/.test(blobSha)) return null;
+    return readJson<FactsRecord>(path.join(this.dir, "facts", `${blobSha}.json`));
+  }
+
+  async saveFacts(blobSha: string, record: FactsRecord): Promise<void> {
+    if (!/^[0-9a-f]{40}$/.test(blobSha)) throw new Error(`Invalid blob sha: ${blobSha}`);
+    await writeAtomic(path.join(this.dir, "facts", `${blobSha}.json`), JSON.stringify(record));
+  }
+
+  async pruneFacts(liveShas: Set<string>): Promise<number> {
+    let pruned = 0;
+    let entries: string[];
+    try {
+      entries = await readdir(path.join(this.dir, "facts"));
+    } catch {
+      return 0;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith(".json")) continue;
+      const sha = entry.slice(0, -5);
+      if (!liveShas.has(sha)) {
+        await rm(path.join(this.dir, "facts", entry), { force: true });
+        pruned++;
+      }
+    }
+    return pruned;
+  }
+
+  async loadSection(slug: string, hash: string): Promise<string | null> {
+    try {
+      return await readFile(path.join(this.dir, "sections", slug, `${hash}.md`), "utf8");
+    } catch {
+      return null;
+    }
+  }
+
+  async saveSection(slug: string, hash: string, markdown: string): Promise<void> {
+    await writeAtomic(path.join(this.dir, "sections", slug, `${hash}.md`), markdown);
+  }
+
+  async loadOutline(slug: string, hash: string): Promise<string | null> {
+    try {
+      return await readFile(path.join(this.dir, "sections", slug, `outline-${hash}.json`), "utf8");
+    } catch {
+      return null;
+    }
+  }
+
+  async saveOutline(slug: string, hash: string, json: string): Promise<void> {
+    await writeAtomic(path.join(this.dir, "sections", slug, `outline-${hash}.json`), json);
+  }
+
+  async pruneSections(slug: string, keep: Set<string>): Promise<void> {
+    const dir = path.join(this.dir, "sections", slug);
+    let entries: string[];
+    try {
+      entries = await readdir(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const stem = entry.replace(/\.(md|json)$/, "").replace(/^outline-/, "");
+      if (!keep.has(stem)) await rm(path.join(dir, entry), { force: true });
+    }
+  }
+
+  async deleteSections(slug: string): Promise<void> {
+    await rm(path.join(this.dir, "sections", slug), { recursive: true, force: true });
   }
 
   async loadModules(): Promise<ModuleRecord[]> {

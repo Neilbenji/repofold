@@ -27,6 +27,14 @@ The wiki lands in `path/to/your/repo/repofold-wiki/`: a static HTML site (works 
 
 Run it again after changing code: unchanged pages are skipped outright, pages whose cited code merely moved get their citations re-anchored without any model call, and pages with real changes are patched section by section. A wiki changelog records what changed between runs.
 
+## Deep mode (the default)
+
+Small local models cannot handle the few-large-calls pipeline that frontier models use, so repofold inverts it. Deep mode makes many small, focused calls instead: it analyzes every important file individually, mines verifiable facts per symbol from its exact source slice, and writes pages section by section with only the relevant facts in context. Crucially, the model never writes citations: it references facts by opaque IDs, and repofold substitutes the real `path:line-line` ranges from its parser data. An invalid citation is structurally impossible.
+
+Everything is cached by content hash (file analyses, facts, page sections), so the first run is slow — 15-30 minutes for a small repository, hours for a large one — and every run after that only touches what changed. When code merely moves, facts are re-anchored to the new line numbers without any model call.
+
+`--fast` switches to the single-pass pipeline (the same design as the hosted product): much faster, noticeably shallower with small models.
+
 ## Commands and flags
 
 ```

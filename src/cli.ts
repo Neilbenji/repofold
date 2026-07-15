@@ -27,6 +27,8 @@ program
   .option("--ollama-url <url>", "Ollama server URL", DEFAULT_OLLAMA_URL)
   .option("--input-budget <n>", "prompt input budget in tokens", String(DEFAULT_INPUT_BUDGET))
   .option("--concurrency <n>", "max parallel LLM requests", String(DEFAULT_CONCURRENCY))
+  .option("--fast", "single-pass pipeline: fewer, larger model calls; faster but shallower")
+  .option("--symbol-cap <n>", "deep mode: max symbols analyzed per file", "8")
   .option("--ignore <glob>", "extra ignore glob (repeatable)", collect, [] as string[])
   .option("--repo-url <url>", "base URL for citation links when there is no GitHub remote")
   .option("--force", "discard cached state and regenerate everything")
